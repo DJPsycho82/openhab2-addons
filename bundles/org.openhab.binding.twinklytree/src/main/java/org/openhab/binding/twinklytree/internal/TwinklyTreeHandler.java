@@ -25,6 +25,7 @@ import java.net.ProtocolException;
 import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
 
 import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.eclipse.jdt.annotation.Nullable;
@@ -61,24 +62,23 @@ public class TwinklyTreeHandler extends BaseThingHandler {
     public void handleCommand(ChannelUID channelUID, Command command) {
         logger.debug("Handle command {} with channel {}", command, channelUID);
         try {
+            refreshIfNeeded();
             if (CHANNEL_SWITCH.equals(channelUID.getId())) {
                 if (command instanceof RefreshType) {
-                    if (config.token == null) {
-                        logger.debug("Not refreshing - No token received yet");
-                        return;
-                    }
                     JSONObject getModeResponse;
                     getModeResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/led/mode"), "GET", null,
                             config.token);
                     String mode = getModeResponse.getString("mode");
                     updateState(channelUID, "off".equalsIgnoreCase(mode) ? OnOffType.OFF : OnOffType.ON);
+                    return;
                 }
 
                 if (OnOffType.OFF.equals(command)) {
                     setMode("off");
-
+                    updateState(channelUID, OnOffType.OFF);
                 } else if (OnOffType.ON.equals(command)) {
                     setMode("movie");
+                    updateState(channelUID, OnOffType.ON);
                 } else {
                     logger.warn("Unexpected command for Twinkly: {}", command);
                 }
@@ -87,12 +87,31 @@ public class TwinklyTreeHandler extends BaseThingHandler {
             updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
                     "Could not control device at IP address x.x.x.x");
             logger.error("Error communicating with Twinkly", e);
+            config.token = null;
         }
     }
 
     private void setMode(String newMode) throws IOException, ProtocolException, MalformedURLException {
         JSONObject setModeResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/led/mode"), "POST",
                 "{\"mode\":\"" + newMode + "\"}", config.token);
+    }
+
+    private void logout() {
+        updateStatus(ThingStatus.OFFLINE);
+        try {
+            sendRequest(new URL(config.getBaseURL(), "/xled/v1/logout"), "POST", "{}", config.token);
+        } catch (IOException e) {
+            logger.debug("Error while logout", e);
+        }
+    }
+
+    private void refreshIfNeeded() {
+        if (config.token == null || isTokenExpired()) {
+            if (config.token != null) {
+                logout();
+            }
+            login();
+        }
     }
 
     @Override
@@ -114,29 +133,15 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         updateStatus(ThingStatus.UNKNOWN);
 
         // Example for background initialization:
-        scheduler.execute(() -> {
-            try {
-                config.token = null;
+        // scheduler.execute(() -> {
+        // login();
 
-                JSONObject loginResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/login"), "POST",
-                        "{\"challenge\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}", null);
-                String unverifiedToken = loginResponse.getString("authentication_token");
-                String challengeResponse = loginResponse.getString("challenge-response");
-                System.out.println("Token: " + unverifiedToken + " response: " + challengeResponse);
-
-                JSONObject verifyResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/verify"), "POST",
-                        "{\"challenge-response\":\"" + challengeResponse + "\"}", unverifiedToken);
-                config.token = unverifiedToken;
-            } catch (IOException e) {
-                logger.error("Error while connecting to twinkly ", e);
-            }
-
-            if (config.token != null) {
-                updateStatus(ThingStatus.ONLINE);
-            } else {
-                updateStatus(ThingStatus.OFFLINE);
-            }
-        });
+        // if (token != null) {
+        // updateStatus(ThingStatus.ONLINE);
+        // } else {
+        // updateStatus(ThingStatus.OFFLINE);
+        // }
+        // });
 
         logger.debug("Finished initializing!");
 
@@ -147,7 +152,33 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         // "Can not access device as username and/or password are invalid");
     }
 
-    private static JSONObject sendRequest(URL loginURL, String httpMethod, @Nullable String requestString,
+    private void login() {
+        try {
+            config.token = null;
+
+            JSONObject loginResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/login"), "POST",
+                    "{\"challenge\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}", null);
+            String unverifiedToken = loginResponse.getString("authentication_token");
+            String challengeResponse = loginResponse.getString("challenge-response");
+            Long tokenExpiresIn = loginResponse.getLong("authentication_token_expires_in");
+
+            logger.debug("Twinkly sent login token {} with challenge {}", unverifiedToken, challengeResponse);
+
+            JSONObject verifyResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/verify"), "POST",
+                    "{\"challenge-response\":\"" + challengeResponse + "\"}", unverifiedToken);
+            config.token = unverifiedToken;
+            config.tokenExpiryDate = new Date(System.currentTimeMillis() + (tokenExpiresIn.longValue() * 1000));
+            updateStatus(ThingStatus.ONLINE);
+        } catch (IOException e) {
+            logger.error("Error while connecting to twinkly ", e);
+        }
+    }
+
+    private boolean isTokenExpired() {
+        return config.tokenExpiryDate.before(new Date());
+    }
+
+    private JSONObject sendRequest(URL loginURL, String httpMethod, @Nullable String requestString,
             @Nullable String token) throws IOException, ProtocolException {
         byte[] out = null;
         HttpURLConnection connection = (HttpURLConnection) loginURL.openConnection();
@@ -170,13 +201,6 @@ public class TwinklyTreeHandler extends BaseThingHandler {
             }
         }
 
-        for (java.util.Map.Entry<String, java.util.List<String>> entry : connection.getHeaderFields().entrySet()) {
-            System.out.println("Header: " + entry.getKey());
-            for (String value : entry.getValue()) {
-                System.out.println("\t-" + value);
-            }
-        }
-
         StringBuilder textBuilder = new StringBuilder();
         try (Reader reader = new BufferedReader(
                 new InputStreamReader(connection.getInputStream(), Charset.forName(StandardCharsets.UTF_8.name())))) {
@@ -186,7 +210,10 @@ public class TwinklyTreeHandler extends BaseThingHandler {
             }
         }
 
-        System.out.println(textBuilder.toString());
+        if (logger.isDebugEnabled()) {
+            logger.debug("Request {} got response headers {} with data {} ", loginURL, connection.getHeaderFields(),
+                    textBuilder);
+        }
         JSONObject loginResponse = new JSONObject(textBuilder.toString());
         return loginResponse;
     }

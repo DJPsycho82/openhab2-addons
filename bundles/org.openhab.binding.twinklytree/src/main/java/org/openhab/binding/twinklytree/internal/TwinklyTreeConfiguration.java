@@ -14,6 +14,7 @@ package org.openhab.binding.twinklytree.internal;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.Date;
 
 import org.eclipse.jdt.annotation.Nullable;
 
@@ -29,6 +30,7 @@ public class TwinklyTreeConfiguration {
      */
     public String host;
     protected @Nullable String token;
+    protected Date tokenExpiryDate = new Date();
 
     public URL getBaseURL() throws MalformedURLException {
         return new URL("http://" + host);
