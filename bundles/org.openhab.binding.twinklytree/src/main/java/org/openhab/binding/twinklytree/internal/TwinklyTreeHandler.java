@@ -12,7 +12,7 @@
  */
 package org.openhab.binding.twinklytree.internal;
 
-import static org.openhab.binding.twinklytree.internal.TwinklyTreeBindingConstants.CHANNEL_SWITCH;
+import static org.openhab.binding.twinklytree.internal.TwinklyTreeBindingConstants.*;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -30,6 +30,7 @@ import java.util.Date;
 import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.eclipse.jdt.annotation.Nullable;
 import org.eclipse.smarthome.core.library.types.OnOffType;
+import org.eclipse.smarthome.core.library.types.PercentType;
 import org.eclipse.smarthome.core.thing.ChannelUID;
 import org.eclipse.smarthome.core.thing.Thing;
 import org.eclipse.smarthome.core.thing.ThingStatus;
@@ -65,11 +66,8 @@ public class TwinklyTreeHandler extends BaseThingHandler {
             refreshIfNeeded();
             if (CHANNEL_SWITCH.equals(channelUID.getId())) {
                 if (command instanceof RefreshType) {
-                    JSONObject getModeResponse;
-                    getModeResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/led/mode"), "GET", null,
-                            config.token);
-                    String mode = getModeResponse.getString("mode");
-                    updateState(channelUID, "off".equalsIgnoreCase(mode) ? OnOffType.OFF : OnOffType.ON);
+                    updateState(channelUID, isOn() ? OnOffType.ON : OnOffType.OFF);
+
                     return;
                 }
 
@@ -83,12 +81,44 @@ public class TwinklyTreeHandler extends BaseThingHandler {
                     logger.warn("Unexpected command for Twinkly: {}", command);
                 }
             }
+            if (CHANNEL_DIMMER.equals(channelUID.getId())) {
+                if (command instanceof RefreshType) {
+                    if (isOn()) {
+                        int brightnessPct = Math.round(getBrightness() * (100 / 255));
+                        updateState(channelUID, new PercentType(brightnessPct));
+                    } else {
+                        updateState(channelUID, PercentType.ZERO);
+                    }
+                    return;
+                }
+                PercentType type = (PercentType) command;
+                setBrightness(type.intValue());
+            }
         } catch (IOException e) {
             updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
-                    "Could not control device at IP address x.x.x.x");
+                    "Could not control device at IP address " + config.host);
             logger.error("Error communicating with Twinkly", e);
             config.token = null;
         }
+    }
+
+    private boolean isOn() throws IOException, ProtocolException, MalformedURLException {
+        JSONObject getModeResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/led/mode"), "GET", null,
+                config.token);
+        String mode = getModeResponse.getString("mode");
+        boolean isOn = "on".equalsIgnoreCase(mode);
+        return isOn;
+    }
+
+    private void setBrightness(int brightness) throws IOException, ProtocolException, MalformedURLException {
+        JSONObject getModeResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/led/out/brightness"), "POST",
+                "{\"mode\":\"enabled\",\"type\":\"A\",\"value\":" + brightness + "}", config.token);
+    }
+
+    private int getBrightness() throws IOException, ProtocolException, MalformedURLException {
+        JSONObject getModeResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/led/out/brightness"), "GET",
+                null, config.token);
+        return getModeResponse.getInt("value");
     }
 
     private void setMode(String newMode) throws IOException, ProtocolException, MalformedURLException {
@@ -211,8 +241,8 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         }
 
         if (logger.isDebugEnabled()) {
-            logger.debug("Request {} got response headers {} with data {} ", loginURL, connection.getHeaderFields(),
-                    textBuilder);
+            logger.debug("Request {} {} {} got response headers {} with data {} ", httpMethod, loginURL, requestString,
+                    connection.getHeaderFields(), textBuilder);
         }
         JSONObject loginResponse = new JSONObject(textBuilder.toString());
         return loginResponse;

@@ -31,4 +31,5 @@ public class TwinklyTreeBindingConstants {
 
     // List of all Channel ids
     public static final String CHANNEL_SWITCH = "switch";
+    public static final String CHANNEL_DIMMER = "dimmer";
 }
