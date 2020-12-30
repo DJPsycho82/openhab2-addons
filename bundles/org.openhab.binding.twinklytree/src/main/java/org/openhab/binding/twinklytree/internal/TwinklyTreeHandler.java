@@ -26,6 +26,8 @@ import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.eclipse.jdt.annotation.Nullable;
@@ -54,6 +56,8 @@ public class TwinklyTreeHandler extends BaseThingHandler {
     private final Logger logger = LoggerFactory.getLogger(TwinklyTreeHandler.class);
 
     private @Nullable TwinklyTreeConfiguration config;
+
+    private @Nullable ScheduledFuture<?> pollingJob;
 
     public TwinklyTreeHandler(Thing thing) {
         super(thing);
@@ -84,8 +88,7 @@ public class TwinklyTreeHandler extends BaseThingHandler {
             if (CHANNEL_DIMMER.equals(channelUID.getId())) {
                 if (command instanceof RefreshType) {
                     if (isOn()) {
-                        int brightnessPct = Math.round(getBrightness() * (100 / 255));
-                        updateState(channelUID, new PercentType(brightnessPct));
+                        updateState(channelUID, new PercentType(getBrightness()));
                     } else {
                         updateState(channelUID, PercentType.ZERO);
                     }
@@ -106,7 +109,7 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         JSONObject getModeResponse = sendRequest(new URL(config.getBaseURL(), "/xled/v1/led/mode"), "GET", null,
                 config.token);
         String mode = getModeResponse.getString("mode");
-        boolean isOn = "on".equalsIgnoreCase(mode);
+        boolean isOn = !"off".equalsIgnoreCase(mode);
         return isOn;
     }
 
@@ -135,7 +138,7 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         }
     }
 
-    private void refreshIfNeeded() {
+    private synchronized void refreshIfNeeded() {
         if (config.token == null || isTokenExpired()) {
             if (config.token != null) {
                 logout();
@@ -165,7 +168,7 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         // Example for background initialization:
         // scheduler.execute(() -> {
         // login();
-
+        pollingJob = scheduler.scheduleWithFixedDelay(this::refreshState, 100, 1, TimeUnit.MINUTES);
         // if (token != null) {
         // updateStatus(ThingStatus.ONLINE);
         // } else {
@@ -180,6 +183,24 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         // Add a description to give user information to understand why thing does not work as expected. E.g.
         // updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.CONFIGURATION_ERROR,
         // "Can not access device as username and/or password are invalid");
+    }
+
+    private void refreshState() {
+        try {
+            refreshIfNeeded();
+
+            boolean isOn = isOn();
+            updateState(CHANNEL_SWITCH, isOn ? OnOffType.ON : OnOffType.OFF);
+
+            int brightnessPct = 0;
+            if (isOn) {
+                brightnessPct = getBrightness();
+            }
+            updateState(CHANNEL_DIMMER, new PercentType(brightnessPct));
+        } catch (IOException e) {
+            config.token = null;
+            logger.error("Issue while polling for state ", e);
+        }
     }
 
     private void login() {
@@ -202,6 +223,11 @@ public class TwinklyTreeHandler extends BaseThingHandler {
         } catch (IOException e) {
             logger.error("Error while connecting to twinkly ", e);
         }
+    }
+
+    @Override
+    public void dispose() {
+        pollingJob.cancel(true);
     }
 
     private boolean isTokenExpired() {
